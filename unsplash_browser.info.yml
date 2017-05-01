@@ -1,0 +1,7 @@
+name: Unsplash entity browser widget
+type: module
+description: Unsplash Entity browser widget
+core: 8.x
+package: Media
+dependencies:
+  - entity_browser
