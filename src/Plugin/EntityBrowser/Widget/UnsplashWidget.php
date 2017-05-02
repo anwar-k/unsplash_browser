@@ -20,6 +20,7 @@ use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Session\SessionInterface;
 use GuzzleHttp\Client;
 use Drupal\Core\Link;
+use Drupal\media_entity\Entity\Media;
 
 /**
  * Provides an Entity Browser widget that uploads new files.
@@ -150,22 +151,32 @@ class UnsplashWidget extends WidgetBase {
    * {@inheritdoc}
    */
   protected function prepareEntities(array $form, FormStateInterface $form_state) {
-    // if (!$this->checkBundle()) {
-    //   return [];
-    // }
+
     $media = [];
+
+    $selected_images = $form_state->getValue('unsplash_urls');
     $selected_ids = array_keys(array_filter($form_state->getValue('selection', [])));
-    /** @var \Drupal\media_entity\MediaBundleInterface $bundle */
-    $bundle = $this->entityTypeManager->getStorage('media_bundle')
-    ->load($this->configuration['media_bundle']);
-    $plugin = $bundle->getType();
-    $source_field = $plugin->getConfiguration()['source_field'];
-    ddl($source_field);
-    foreach ($selected_ids as $bynder_id) {
-      $media[] = Media::create([
-        'bundle' => $bundle->id(),
-        $source_field => $bynder_id,
-        ]);
+    foreach ($selected_ids as $id) {
+
+      $query = \Drupal::entityQuery('media');
+      $query->condition('status', 1);
+      $query->condition('bundle', 'unplash');
+      $query->condition('field_unsplash_id', $id);
+      $entity_id = $query->execute();
+      if ($entity_id) {
+        $media[] = $entity_id;
+      }
+      else {
+        $data = file_get_contents('https://api.unsplash.com/photos/'. $id .'?');
+        $file = file_save_data($data, 'public://druplicon.png', FILE_EXISTS_REPLACE);
+        $media_entity = Media::create([
+          'bundle' => 'unsplash',
+          'field_unsplash_id' => $id,
+          'field_unsplash_image' => array('uri'=> 'https://unsplash.com/?photo=' . $id ),
+          ]);
+        $media_entity->save();
+        $media[] = $media_entity->id();
+      }
     }
     return $media;
   }
@@ -176,99 +187,91 @@ class UnsplashWidget extends WidgetBase {
   public function getForm(array &$original_form, FormStateInterface $form_state, array $additional_widget_parameters) {
     $form = parent::getForm($original_form, $form_state, $additional_widget_parameters);
 
-    if ($form_state->getValue('errors')) {
-      $form['actions']['submit']['#access'] = FALSE;
-      return $form;
-    }
-
-    $form['filters'] = [
-    '#type' => 'container',
-    '#tree' => TRUE,
-    '#attributes' => ['class' => 'unsplash-filters'],
+    $form['search'] = [
+    '#type' => 'fieldset',
+    '#title' => $this->t('Search'),
     ];
 
-    $form['filters']['search_unsplash'] = [
-    '#type' => 'textfield',
-    '#weight' => -1,
-    '#title' => $this->t('Search keyword'),
-    '#attributes' => [
-    'size' => 30,
-    ],
+
+    $form['search']['keyword'] = [
+    '#type' => 'search',
+    '#title' => $this->t('Keyword'),
+    '#default_value' => $search_params['unsplash_keyword'],
     ];
 
-    $form['search_button'] = [
-    '#type' => 'button',
-    '#weight' =>  5,
+    $form['search']['submit'] = [
+    '#type' => 'submit',
     '#value' => $this->t('Search'),
-    '#name' => 'search_submit',
+    '#submit' => [[$this, 'searchSubmit']],
     ];
 
-    $form['thumbnails'] = [
-    '#type' => 'container',
-    '#weight' =>  10,
-    '#attributes' => ['id' => 'thumbnails', 'class' => 'grid'],
-    ];
+    if(!empty($form_state->get('unsplash_keyword'))) {
 
-    if ($form_state->getTriggeringElement()['#name'] == 'search_submit') {
-      EntityBrowserPagerElement::setCurrentPage($form_state);
-    }
-    $page = EntityBrowserPagerElement::getCurrentPage($form_state);
+      $query = [
+      'keyword' => $form_state->get('unsplash_keyword'),
+      'page' => EntityBrowserPagerElement::getCurrentPage($form_state),
+      'client_id' => '25039e7b5b8cc989c2a48f439bed59104f8fb11807b6a297755ffe93f330aa4a',
+      ]; 
+      $client = \Drupal::httpClient();
+      $request = $client->get('https://api.unsplash.com/search/photos?query=' . $query['keyword'] . '&page=' . $query['page'] . '&client_id=' . $query['client_id']);
+      $response = json_decode($request->getBody());
+      if (!empty($response->results)) {
+        foreach ($response->results as $media) {
 
-    ddl($form);
+          $form['thumbnails']['thumbnail-' . $media->id] = [
+          '#type' => 'container',
+          '#attributes' => ['id' => $media->id, 'class' => ['grid-item']],
+          ];
+          $form['thumbnails']['thumbnail-' . $media->id]['check_' . $media->id] = [
+          '#type' => 'checkbox',
+          '#parents' => ['selection', $media->id],
+          '#attributes' => ['class' => ['item-selector']],
+          ];
 
-    $query = [
-    'keyword' => $form_state->getValue(['filters', 'search_unsplash']),
-    'page' => $page,
-    'client_id' => '25039e7b5b8cc989c2a48f439bed59104f8fb11807b6a297755ffe93f330aa4a',
-    ];
+          $form['thumbnails']['thumbnail-' . $media->id['image']] = [
+          '#theme' => 'unsplash_search_item',
+          '#thumbnail_uri' => $media->urls->thumb,
+          '#name' => $query['keyword'],
+          ]  ;
+        }
 
-    $client = \Drupal::httpClient();
-    $request = $client->get('https://api.unsplash.com/search/photos?query=' . $query['keyword'] . '&page=' . $query['page'] . '&client_id=' . $query['client_id']);
-    $response = json_decode($request->getBody());
-
-    if (!empty($response->results)) {
-      foreach ($response->results as $media) {
-
-        $form['thumbnails']['thumbnail-' . $media->id] = [
-        '#type' => 'container',
-        '#attributes' => ['id' => $media->id, 'class' => ['grid-item']],
+        $form['pager_eb'] = [
+        '#type' => 'entity_browser_pager',
+        '#total_pages' => $response->total_pages,
+        '#weight' => 20,
         ];
-        $form['thumbnails']['thumbnail-' . $media->id]['check_' . $media->id] = [
-        '#type' => 'checkbox',
-        '#parents' => ['selection', $media->id],
-        '#attributes' => ['class' => ['item-selector']],
-        ];
-        $form['thumbnails']['thumbnail-' . $media->id['image']] = [
-        '#theme' => 'bynder_search_item',
-        '#thumbnail_uri' => $media->urls->thumb,
-        '#name' => $query['keyword'],
-        ]  ;
+
+
       }
-
-      $form['pager_eb'] = [
-      '#type' => 'entity_browser_pager',
-      '#total_pages' => $response->total_pages,
-      '#weight' => 20,
-      ];
-
-      // Set validation errors limit to prevent validation of filters on select.
-      // We also need to set #submit to the default submit callback otherwise
-      // limit won't take effect. Thank you Form API, you are very kind...
-      // @see \Drupal\Core\Form\FormValidator::determineLimitValidationErrors()
-      $form['actions']['submit']['#limit_validation_errors'] = [['selection']];
-      $form['actions']['submit']['#submit'] = ['::submitForm'];
+      else {
+        $form['empty_message'] = [
+        '#prefix' => '<div class="empty-message">',
+        '#markup' => $this->t('Not assets found for current search criteria.'),
+        '#suffix' => '</div>',
+        '#weight' => $max_option_weight + 20,
+        ];
+        $form['actions']['submit']['#access'] = FALSE;
+      }
     }
-    else {
-      $form['empty_message'] = [
-      '#prefix' => '<div class="empty-message">',
-      '#markup' => $this->t('Not assets found for current search criteria.'),
-      '#suffix' => '</div>',
-      '#weight' => $max_option_weight + 20,
-      ];
-      $form['actions']['submit']['#access'] = FALSE;
-    }
-
+    
     return $form;
+  }
+
+  /**
+   * Search form submit callback.
+   *
+   * @param array $form
+   *   The form array.
+   * @param \Drupal\Core\Form\FormStateInterface $form_state
+   *   Form state object.
+   */
+  public function searchSubmit(array $form, FormStateInterface $form_state) {
+    $values = $form_state->getValues();
+    $form_state->set('unsplash_keyword', $values['keyword']);
+
+    EntityBrowserPagerElement::setCurrentPage($form_state);
+    $form_state->setRebuild();
+    
   }
 
   /**
